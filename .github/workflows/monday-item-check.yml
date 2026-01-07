@@ -11,8 +11,9 @@ jobs:
     steps:
       - name: Check Branch Name for Monday Item ID
         id: check-branch
+        env:
+          BRANCH_NAME: ${{ github.head_ref }}
         run: |
-          BRANCH_NAME="${{ github.head_ref }}"
           echo "Branch name: $BRANCH_NAME"
           
           # Check if branch name contains a Monday item ID (8+ digits)
@@ -67,8 +68,8 @@ jobs:
             echo "✅ Monday Item ID $MONDAY_ITEM_ID found in both branch name and PR description"
           else
             echo "consistency_valid=false" >> $GITHUB_OUTPUT
-            echo "⚠️ Warning: Monday Item ID in branch ($MONDAY_ITEM_ID) may not match the ID in PR description"
-            echo "This is a warning only - please verify the correct ticket is linked"
+            echo "❌ Monday Item ID in branch ($MONDAY_ITEM_ID) does not appear in PR description"
+            echo "The branch and PR description must reference the same Monday ticket"
           fi
 
       - name: Generate Summary
@@ -91,6 +92,16 @@ jobs:
           fi
           
           echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.check-branch.outputs.branch_valid }}" == "true" ] && [ "${{ steps.check-description.outputs.description_valid }}" == "true" ]; then
+            if [ "${{ steps.validate-consistency.outputs.consistency_valid }}" == "true" ]; then
+              echo "✅ **ID Consistency**: Branch Monday Item ID matches PR description" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ **ID Consistency**: Branch Monday Item ID does not appear in PR description" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### SOC2 Compliance Requirement" >> $GITHUB_STEP_SUMMARY
@@ -99,13 +110,14 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "1. Branch name must contain the Monday Item ID (8+ digits)" >> $GITHUB_STEP_SUMMARY
           echo "2. PR description must contain the Monday ticket URL" >> $GITHUB_STEP_SUMMARY
+          echo "3. The Monday Item ID in the branch must match the ticket in the PR description" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Branch naming format**: \`feature/<monday-item-id>-<description>\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Example**: \`feature/1234567890-add-user-authentication\`" >> $GITHUB_STEP_SUMMARY
 
       - name: Fail if Requirements Not Met
-        if: steps.check-branch.outputs.branch_valid != 'true' || steps.check-description.outputs.description_valid != 'true'
+        if: steps.check-branch.outputs.branch_valid != 'true' || steps.check-description.outputs.description_valid != 'true' || steps.validate-consistency.outputs.consistency_valid != 'true'
         run: |
           echo ""
           echo "=========================================="
@@ -131,8 +143,19 @@ jobs:
             echo ""
           fi
           
+          if [ "${{ steps.check-branch.outputs.branch_valid }}" == "true" ] && [ "${{ steps.check-description.outputs.description_valid }}" == "true" ] && [ "${{ steps.validate-consistency.outputs.consistency_valid }}" != "true" ]; then
+            echo "ISSUE: Monday Item ID mismatch between branch and PR description"
+            echo ""
+            echo "The Monday Item ID in your branch name (${{ steps.check-branch.outputs.monday_item_id }}) does not"
+            echo "appear in your PR description. This breaks the two-way connection requirement."
+            echo ""
+            echo "To fix this, ensure your PR description contains a link to the same Monday ticket"
+            echo "referenced in your branch name."
+            echo ""
+          fi
+          
           echo "=========================================="
-          echo "For SOC2 compliance, both conditions must be met."
+          echo "For SOC2 compliance, all conditions must be met."
           echo "=========================================="
           
           exit 1
