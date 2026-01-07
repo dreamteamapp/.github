@@ -1,0 +1,139 @@
+name: Monday Item Connection Check
+
+on:
+  workflow_call:
+
+jobs:
+  check-monday-connection:
+    name: Verify Monday Item Connection
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check Branch Name for Monday Item ID
+        id: check-branch
+        run: |
+          BRANCH_NAME="${{ github.head_ref }}"
+          echo "Branch name: $BRANCH_NAME"
+          
+          # Check if branch name contains a Monday item ID (8+ digits)
+          if echo "$BRANCH_NAME" | grep -qE '[0-9]{8,}'; then
+            # Extract the Monday item ID from the branch name
+            MONDAY_ITEM_ID=$(echo "$BRANCH_NAME" | grep -oE '[0-9]{8,}' | head -1)
+            echo "monday_item_id=$MONDAY_ITEM_ID" >> $GITHUB_OUTPUT
+            echo "branch_valid=true" >> $GITHUB_OUTPUT
+            echo "✅ Branch name contains Monday Item ID: $MONDAY_ITEM_ID"
+          else
+            echo "branch_valid=false" >> $GITHUB_OUTPUT
+            echo "❌ Branch name does not contain a Monday Item ID (8+ digits)"
+            echo ""
+            echo "Expected branch name format: feature/<monday-item-id>-<description>"
+            echo "Example: feature/1234567890-add-user-authentication"
+          fi
+
+      - name: Check PR Description for Monday Link
+        id: check-description
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          echo "Checking PR description for Monday link..."
+          
+          # Check if PR body contains a Monday.com URL
+          if echo "$PR_BODY" | grep -qiE 'monday\.com/(boards|pulses)/[0-9]+'; then
+            # Extract the Monday URL from the PR body
+            MONDAY_URL=$(echo "$PR_BODY" | grep -oiE 'https?://[^[:space:]]*monday\.com[^[:space:]]*' | head -1)
+            echo "monday_url=$MONDAY_URL" >> $GITHUB_OUTPUT
+            echo "description_valid=true" >> $GITHUB_OUTPUT
+            echo "✅ PR description contains Monday link: $MONDAY_URL"
+          else
+            echo "description_valid=false" >> $GITHUB_OUTPUT
+            echo "❌ PR description does not contain a Monday.com link"
+            echo ""
+            echo "Please add the Monday ticket link to your PR description."
+            echo "Example: https://yourcompany.monday.com/boards/123456789/pulses/1234567890"
+          fi
+
+      - name: Validate Monday Item ID Consistency
+        id: validate-consistency
+        if: steps.check-branch.outputs.branch_valid == 'true' && steps.check-description.outputs.description_valid == 'true'
+        env:
+          MONDAY_ITEM_ID: ${{ steps.check-branch.outputs.monday_item_id }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          echo "Validating that branch item ID matches PR description..."
+          
+          # Check if the Monday item ID from the branch appears in the PR description
+          if echo "$PR_BODY" | grep -q "$MONDAY_ITEM_ID"; then
+            echo "consistency_valid=true" >> $GITHUB_OUTPUT
+            echo "✅ Monday Item ID $MONDAY_ITEM_ID found in both branch name and PR description"
+          else
+            echo "consistency_valid=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Warning: Monday Item ID in branch ($MONDAY_ITEM_ID) may not match the ID in PR description"
+            echo "This is a warning only - please verify the correct ticket is linked"
+          fi
+
+      - name: Generate Summary
+        run: |
+          echo "## Monday Item Connection Check Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.check-branch.outputs.branch_valid }}" == "true" ]; then
+            echo "✅ **Branch Name**: Contains Monday Item ID \`${{ steps.check-branch.outputs.monday_item_id }}\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Branch Name**: Missing Monday Item ID" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.check-description.outputs.description_valid }}" == "true" ]; then
+            echo "✅ **PR Description**: Contains Monday.com link" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **PR Description**: Missing Monday.com link" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### SOC2 Compliance Requirement" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "For SOC2 Type 2 compliance, all PRs must have a two-way connection to Monday tickets:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. Branch name must contain the Monday Item ID (8+ digits)" >> $GITHUB_STEP_SUMMARY
+          echo "2. PR description must contain the Monday ticket URL" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch naming format**: \`feature/<monday-item-id>-<description>\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Example**: \`feature/1234567890-add-user-authentication\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Fail if Requirements Not Met
+        if: steps.check-branch.outputs.branch_valid != 'true' || steps.check-description.outputs.description_valid != 'true'
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "❌ SOC2 COMPLIANCE CHECK FAILED"
+          echo "=========================================="
+          echo ""
+          
+          if [ "${{ steps.check-branch.outputs.branch_valid }}" != "true" ]; then
+            echo "ISSUE: Branch name does not contain a Monday Item ID"
+            echo ""
+            echo "To fix this, create a new branch with the correct naming:"
+            echo "  git checkout -b feature/<monday-item-id>-<description>"
+            echo ""
+            echo "Then push and create a new PR from that branch."
+            echo ""
+          fi
+          
+          if [ "${{ steps.check-description.outputs.description_valid }}" != "true" ]; then
+            echo "ISSUE: PR description does not contain a Monday.com link"
+            echo ""
+            echo "To fix this, edit your PR description and add the Monday ticket link:"
+            echo "  🔗 Monday Ticket: https://yourcompany.monday.com/boards/xxxxx/pulses/<item-id>"
+            echo ""
+          fi
+          
+          echo "=========================================="
+          echo "For SOC2 compliance, both conditions must be met."
+          echo "=========================================="
+          
+          exit 1
+
