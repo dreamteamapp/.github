@@ -19,22 +19,31 @@ jobs:
         id: diff
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} \
+          gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
             -H "Accept: application/vnd.github.v3.diff" > pr.diff
 
           # Truncate to ~100KB to stay within API limits
           head -c 100000 pr.diff > pr_truncated.diff
 
-          DIFF=$(cat pr_truncated.diff)
-          echo "diff<<DIFF_EOF" >> "$GITHUB_OUTPUT"
-          echo "$DIFF" >> "$GITHUB_OUTPUT"
-          echo "DIFF_EOF" >> "$GITHUB_OUTPUT"
+          # Use randomized delimiter to prevent injection via diff content
+          DELIM="EOF_$(openssl rand -hex 16)"
 
-          echo "title=${{ github.event.pull_request.title }}" >> "$GITHUB_OUTPUT"
-          echo "files_changed=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} --jq '.changed_files')" >> "$GITHUB_OUTPUT"
-          echo "additions=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} --jq '.additions')" >> "$GITHUB_OUTPUT"
-          echo "deletions=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} --jq '.deletions')" >> "$GITHUB_OUTPUT"
+          echo "diff<<${DELIM}" >> "$GITHUB_OUTPUT"
+          cat pr_truncated.diff >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+          echo "title<<${DELIM}_TITLE" >> "$GITHUB_OUTPUT"
+          echo "${PR_TITLE}" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}_TITLE" >> "$GITHUB_OUTPUT"
+
+          PR_DATA=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '{changed_files, additions, deletions}')
+          echo "files_changed=$(echo "$PR_DATA" | jq -r '.changed_files')" >> "$GITHUB_OUTPUT"
+          echo "additions=$(echo "$PR_DATA" | jq -r '.additions')" >> "$GITHUB_OUTPUT"
+          echo "deletions=$(echo "$PR_DATA" | jq -r '.deletions')" >> "$GITHUB_OUTPUT"
 
       - name: Analyze PR scope
         id: analyze
@@ -79,17 +88,21 @@ jobs:
 
           if [ "$SHOULD_SPLIT" = "true" ]; then
             COMMENT=$(echo "$CONTENT" | jq -r '.comment')
-            echo "comment<<COMMENT_EOF" >> "$GITHUB_OUTPUT"
+            DELIM="EOF_$(openssl rand -hex 16)"
+            echo "comment<<${DELIM}" >> "$GITHUB_OUTPUT"
             echo "$COMMENT" >> "$GITHUB_OUTPUT"
-            echo "COMMENT_EOF" >> "$GITHUB_OUTPUT"
+            echo "${DELIM}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Post comment if PR should be split
         if: steps.analyze.outputs.should_split == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMENT_BODY: ${{ steps.analyze.outputs.comment }}
         run: |
-          EXISTING=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+          EXISTING=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
             --jq '[.[] | select(.body | startswith("<!-- pr-scope-review -->"))] | length')
 
           if [ "$EXISTING" -gt "0" ]; then
@@ -98,6 +111,6 @@ jobs:
           fi
 
           BODY="<!-- pr-scope-review -->
-          ${{ steps.analyze.outputs.comment }}"
+          ${COMMENT_BODY}"
 
-          gh pr comment ${{ github.event.pull_request.number }} --body "$BODY"
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "$BODY"
