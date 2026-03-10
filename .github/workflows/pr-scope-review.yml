@@ -2,6 +2,9 @@ name: PR Scope Review
 
 on:
   workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
 
 jobs:
   pr-scope-review:
@@ -10,36 +13,91 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      id-token: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Get PR diff
+        id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} \
+            -H "Accept: application/vnd.github.v3.diff" > pr.diff
 
-      - name: Review PR scope
-        uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt: |
-            Review this pull request and evaluate whether it should be split into smaller PRs.
-            Do NOT review code quality, bugs, style, security, or anything else — focus ONLY on
-            whether this PR should be split.
+          # Truncate to ~100KB to stay within API limits
+          head -c 100000 pr.diff > pr_truncated.diff
 
-            Flag the PR if it has EITHER of these problems:
+          DIFF=$(cat pr_truncated.diff)
+          echo "diff<<DIFF_EOF" >> "$GITHUB_OUTPUT"
+          echo "$DIFF" >> "$GITHUB_OUTPUT"
+          echo "DIFF_EOF" >> "$GITHUB_OUTPUT"
 
-            1. Mixed concerns — the PR bundles multiple independent pieces of work that could
-               each stand on their own (e.g. a bug fix with a refactor, a new feature with
-               unrelated cleanup, multiple independent features). Even a small PR can have this.
+          echo "title=${{ github.event.pull_request.title }}" >> "$GITHUB_OUTPUT"
+          echo "files_changed=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} --jq '.changed_files')" >> "$GITHUB_OUTPUT"
+          echo "additions=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} --jq '.additions')" >> "$GITHUB_OUTPUT"
+          echo "deletions=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} --jq '.deletions')" >> "$GITHUB_OUTPUT"
 
-            2. Sheer size — the PR changes so many lines or files that it becomes difficult to
-               review meaningfully, even if it's technically one concern. Use your judgement —
-               a large migration or generated code is fine, but a massive hand-written feature
-               that could be delivered incrementally is not.
+      - name: Analyze PR scope
+        id: analyze
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PR_TITLE: ${{ steps.diff.outputs.title }}
+          PR_FILES: ${{ steps.diff.outputs.files_changed }}
+          PR_ADDITIONS: ${{ steps.diff.outputs.additions }}
+          PR_DELETIONS: ${{ steps.diff.outputs.deletions }}
+          PR_DIFF: ${{ steps.diff.outputs.diff }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg title "$PR_TITLE" \
+            --arg files "$PR_FILES" \
+            --arg additions "$PR_ADDITIONS" \
+            --arg deletions "$PR_DELETIONS" \
+            --arg diff "$PR_DIFF" \
+            '{
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 1024,
+              messages: [{
+                role: "user",
+                content: ("Review this pull request and evaluate whether it should be split into smaller PRs.\nDo NOT review code quality, bugs, style, security, or anything else — focus ONLY on whether this PR should be split.\n\nFlag the PR if it has EITHER of these problems:\n\n1. Mixed concerns — the PR bundles multiple independent pieces of work that could each stand on their own (e.g. a bug fix with a refactor, a new feature with unrelated cleanup, multiple independent features). Even a small PR can have this.\n\n2. Sheer size — the PR changes so many lines or files that it becomes difficult to review meaningfully, even if it is technically one concern. Use your judgement — a large migration or generated code is fine, but a massive hand-written feature that could be delivered incrementally is not.\n\nIf the PR should be split, respond with a JSON object: {\"should_split\": true, \"comment\": \"your markdown comment explaining why and how to split\"}\nIf the PR is focused and reviewable, respond with: {\"should_split\": false}\n\nRespond ONLY with the JSON object, no other text.\n\n## PR Info\nTitle: " + $title + "\nFiles changed: " + $files + "\nAdditions: " + $additions + "\nDeletions: " + $deletions + "\n\n## Diff\n" + $diff)
+              }]
+            }')
 
-            If you flag the PR, post a single PR comment that:
-            - Lists the distinct pieces of work you identified
-            - Suggests concrete ways to split them into separate, focused PRs
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "$PAYLOAD")
 
-            If the PR is focused and reviewable, do nothing — do not comment.
+          CONTENT=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
+
+          if [ -z "$CONTENT" ]; then
+            echo "API error: $RESPONSE"
+            exit 0
+          fi
+
+          SHOULD_SPLIT=$(echo "$CONTENT" | jq -r '.should_split // false')
+          echo "should_split=$SHOULD_SPLIT" >> "$GITHUB_OUTPUT"
+
+          if [ "$SHOULD_SPLIT" = "true" ]; then
+            COMMENT=$(echo "$CONTENT" | jq -r '.comment')
+            echo "comment<<COMMENT_EOF" >> "$GITHUB_OUTPUT"
+            echo "$COMMENT" >> "$GITHUB_OUTPUT"
+            echo "COMMENT_EOF" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post comment if PR should be split
+        if: steps.analyze.outputs.should_split == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          EXISTING=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            --jq '[.[] | select(.body | startswith("<!-- pr-scope-review -->"))] | length')
+
+          if [ "$EXISTING" -gt "0" ]; then
+            echo "Comment already exists, skipping"
+            exit 0
+          fi
+
+          BODY="<!-- pr-scope-review -->
+          ${{ steps.analyze.outputs.comment }}"
+
+          gh pr comment ${{ github.event.pull_request.number }} --body "$BODY"
