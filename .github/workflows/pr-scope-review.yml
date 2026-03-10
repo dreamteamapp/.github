@@ -1,0 +1,45 @@
+name: PR Scope Review
+
+on:
+  workflow_call:
+
+jobs:
+  pr-scope-review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Review PR scope
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Review this pull request and evaluate whether it should be split into smaller PRs.
+            Do NOT review code quality, bugs, style, security, or anything else — focus ONLY on
+            whether this PR should be split.
+
+            Flag the PR if it has EITHER of these problems:
+
+            1. Mixed concerns — the PR bundles multiple independent pieces of work that could
+               each stand on their own (e.g. a bug fix with a refactor, a new feature with
+               unrelated cleanup, multiple independent features). Even a small PR can have this.
+
+            2. Sheer size — the PR changes so many lines or files that it becomes difficult to
+               review meaningfully, even if it's technically one concern. Use your judgement —
+               a large migration or generated code is fine, but a massive hand-written feature
+               that could be delivered incrementally is not.
+
+            If you flag the PR, post a single PR comment that:
+            - Lists the distinct pieces of work you identified
+            - Suggests concrete ways to split them into separate, focused PRs
+
+            If the PR is focused and reviewable, do nothing — do not comment.
