@@ -34,6 +34,7 @@ jobs:
 
           echo "diff<<${DELIM}" >> "$GITHUB_OUTPUT"
           cat pr_truncated.diff >> "$GITHUB_OUTPUT"
+          echo "" >> "$GITHUB_OUTPUT"
           echo "${DELIM}" >> "$GITHUB_OUTPUT"
 
           echo "title<<${DELIM}_TITLE" >> "$GITHUB_OUTPUT"
@@ -127,7 +128,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           COMMENT_BODY: ${{ steps.analyze.outputs.comment }}
         run: |
-          EXISTING=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+          EXISTING=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
             --jq '[.[] | select(.body | startswith("<!-- pr-scope-review -->"))] | length')
 
           if [ "$EXISTING" -gt "0" ]; then
