@@ -1,0 +1,9 @@
+name: monday-check
+
+on:
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  monday-check:
+    uses: ./.github/workflows/monday-item-check.yml
