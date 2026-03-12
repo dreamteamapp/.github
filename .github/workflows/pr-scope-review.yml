@@ -27,10 +27,7 @@ jobs:
             -H "Accept: application/vnd.github.v3.diff" > pr.diff
 
           # Truncate to ~100KB to stay within API limits
-          head -c 100000 pr.diff > pr_truncated.diff
-
-          # Write diff to a file instead of GITHUB_OUTPUT to avoid size limits
-          mv pr_truncated.diff "$RUNNER_TEMP/pr_diff.txt"
+          head -c 100000 pr.diff > "$RUNNER_TEMP/pr_diff.txt"
 
           DELIM="EOF_$(openssl rand -hex 16)"
 
@@ -52,7 +49,10 @@ jobs:
           PR_ADDITIONS: ${{ steps.diff.outputs.additions }}
           PR_DELETIONS: ${{ steps.diff.outputs.deletions }}
         run: |
-          PR_DIFF=$(cat "$RUNNER_TEMP/pr_diff.txt")
+          # Build user content header (without diff)
+          printf "## PR Info\nTitle: %s\nFiles changed: %s\nAdditions: %s\nDeletions: %s\n\n## Diff\n" \
+            "$PR_TITLE" "$PR_FILES" "$PR_ADDITIONS" "$PR_DELETIONS" > "$RUNNER_TEMP/user_content.txt"
+          cat "$RUNNER_TEMP/pr_diff.txt" >> "$RUNNER_TEMP/user_content.txt"
 
           SYSTEM_INSTRUCTION="You are a PR scope reviewer. Review the pull request data provided by the user and evaluate whether it should be split into smaller PRs.
           Do NOT review code quality, bugs, style, security, or anything else — focus ONLY on whether this PR should be split.
@@ -69,18 +69,10 @@ jobs:
 
           Respond ONLY with the JSON object, no other text."
 
-          USER_CONTENT="## PR Info
-          Title: ${PR_TITLE}
-          Files changed: ${PR_FILES}
-          Additions: ${PR_ADDITIONS}
-          Deletions: ${PR_DELETIONS}
-
-          ## Diff
-          ${PR_DIFF}"
-
+          # Use --rawfile to safely read diff content with any characters
           PAYLOAD=$(jq -n \
             --arg system "$SYSTEM_INSTRUCTION" \
-            --arg user "$USER_CONTENT" \
+            --rawfile user "$RUNNER_TEMP/user_content.txt" \
             '{
               systemInstruction: {
                 parts: [{ text: $system }]
