@@ -38,11 +38,6 @@ jobs:
             echo "found_id=$FOUND_ID" >> $GITHUB_OUTPUT
             echo "valid=true" >> $GITHUB_OUTPUT
             echo "✅ PR title contains Monday Item ID: $FOUND_ID"
-          elif echo "$PR_TITLE" | grep -qiE '\[.*[0-9]{8,}.*\]'; then
-            FOUND_ID=$(echo "$PR_TITLE" | grep -oE '[0-9]{8,}' | head -1)
-            echo "found_id=$FOUND_ID" >> $GITHUB_OUTPUT
-            echo "valid=true" >> $GITHUB_OUTPUT
-            echo "✅ PR title contains Monday Item ID in brackets: $FOUND_ID"
           else
             echo "valid=false" >> $GITHUB_OUTPUT
             echo "ℹ️ PR title does not contain a Monday Item ID"
@@ -73,16 +68,19 @@ jobs:
           fi
 
       - name: Generate Summary
+        env:
+          BRANCH_VALID: ${{ steps.check-branch.outputs.valid }}
+          TITLE_VALID: ${{ steps.check-title.outputs.valid }}
+          DESC_VALID: ${{ steps.check-description.outputs.valid }}
+          BRANCH_ID: ${{ steps.check-branch.outputs.found_id }}
+          TITLE_ID: ${{ steps.check-title.outputs.found_id }}
+          DESC_ID: ${{ steps.check-description.outputs.found_id }}
         run: |
-          BRANCH_VALID="${{ steps.check-branch.outputs.valid }}"
-          TITLE_VALID="${{ steps.check-title.outputs.valid }}"
-          DESC_VALID="${{ steps.check-description.outputs.valid }}"
-
           echo "## Monday Item Connection Check Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           if [ "$BRANCH_VALID" == "true" ]; then
-            echo "✅ **Branch Name**: Contains Monday Item ID \`${{ steps.check-branch.outputs.found_id }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **Branch Name**: Contains Monday Item ID \`$BRANCH_ID\`" >> $GITHUB_STEP_SUMMARY
           else
             echo "⬜ **Branch Name**: No Monday Item ID found" >> $GITHUB_STEP_SUMMARY
           fi
@@ -90,7 +88,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           if [ "$TITLE_VALID" == "true" ]; then
-            echo "✅ **PR Title**: Contains Monday Item ID \`${{ steps.check-title.outputs.found_id }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **PR Title**: Contains Monday Item ID \`$TITLE_ID\`" >> $GITHUB_STEP_SUMMARY
           else
             echo "⬜ **PR Title**: No Monday Item ID found" >> $GITHUB_STEP_SUMMARY
           fi
@@ -98,7 +96,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           if [ "$DESC_VALID" == "true" ]; then
-            echo "✅ **PR Description**: Contains Monday Item ID \`${{ steps.check-description.outputs.found_id }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **PR Description**: Contains Monday Item ID \`$DESC_ID\`" >> $GITHUB_STEP_SUMMARY
           else
             echo "⬜ **PR Description**: No Monday Item ID found" >> $GITHUB_STEP_SUMMARY
           fi
@@ -123,6 +121,9 @@ jobs:
 
       - name: Fail if Requirements Not Met
         if: steps.check-branch.outputs.valid != 'true' && steps.check-title.outputs.valid != 'true' && steps.check-description.outputs.valid != 'true'
+        env:
+          BRANCH_NAME: ${{ github.head_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           echo ""
           echo "=========================================="
@@ -130,8 +131,8 @@ jobs:
           echo "=========================================="
           echo ""
           echo "No Monday Item ID was found in any of:"
-          echo "  - Branch name: ${{ github.head_ref }}"
-          echo "  - PR title: ${{ github.event.pull_request.title }}"
+          echo "  - Branch name: $BRANCH_NAME"
+          echo "  - PR title: $PR_TITLE"
           echo "  - PR description"
           echo ""
           echo "To fix this, add a Monday Item ID (8+ digits) in at least ONE of:"
