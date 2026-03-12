@@ -120,7 +120,7 @@ jobs:
           COMMENT_BODY: ${{ steps.analyze.outputs.comment }}
         run: |
           EXISTING=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-            --jq '.[] | select(.body | startswith("<!-- pr-scope-review -->")) | .id' | wc -l)
+            --jq '.[] | select(.body | startswith("<!-- pr-scope-review -->")) | .id' | grep -c . || true)
 
           if [ "$EXISTING" -gt "0" ]; then
             echo "Comment already exists, skipping"
