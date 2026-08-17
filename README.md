@@ -57,7 +57,7 @@ The review counterpart of the Monday check. It requires a PR to carry evidence t
 <!-- code-review: sha=a3f9c21 findings=3 blockers=0 at=2026-08-17T10:04Z skill=review-pr -->
 ```
 
-The `review-pr` and `code-review` skills write that line. A human can add it by hand; the failure summary prints the exact line to paste, with the current head SHA already filled in.
+The Shapes review skills write that line, by two routes. `review-pr` runs against an open PR and edits the description directly. `code-review` runs before a PR exists, so it leaves the line in a note under `.git/` that `create-pr-with-monday-item` reads into the body it writes — which is what stops a review that ran in an earlier session from being lost. A human can also add the line by hand: the failure summary prints the exact one to paste, with the current head SHA already filled in.
 
 It reads text out of the PR and nothing else. It does not run a review and never judges what a review found.
 
