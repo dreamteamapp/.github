@@ -40,3 +40,11 @@ permissions: {}
 jobs:
   code-review-check:
     uses: ./.github/workflows/code-review-attestation-check.yml
+    with:
+      # TEMPORARY, reverted in the next commit. Proving that `with:` reaches
+      # `inputs.enforce-from` across workflow_call - the one layer the test suite
+      # cannot reach, because everything between ${{ and }} is evaluated by GitHub
+      # and there is no local interpreter for it. This PR was opened 2026-08-17,
+      # so a 2026-08-18 cutoff must flip its own verdict from fail_missing to
+      # exempt_grandfathered.
+      enforce-from: "2026-08-18"
