@@ -70,6 +70,8 @@ It reads text out of the PR and nothing else. It does not run a review and never
 | `no-review-needed` label | pass, exemption recorded in the PR timeline |
 | Bot-authored PR | pass |
 | `merge_group` ref | pass |
+| PR opened before the repo's `enforce-from` | pass, grandfathered |
+| `enforce-from` set to something that is not a real date | **fail** — the repo's caller is misconfigured |
 
 #### Usage
 
@@ -97,6 +99,28 @@ Three details are load-bearing, and each has a named failure mode:
 3. **Keep `merge_group`.** A merge queue re-runs required checks against a ref with no PR attached; the reusable workflow short-circuits that to a pass, but only if it is invoked at all, and a required check that never reports blocks the merge forever.
 
 `exempt-label` is configurable via `with:` if a repo needs a different label name.
+
+#### Adopting in a repo that already has open PRs
+
+A required status check applies to every **open** pull request the moment it becomes required, not only to new ones. A repo with a long-lived PR backlog therefore has every one of those PRs blocked on a review nobody is going to retro-fit, and the usual outcome is that someone asks for the check to be switched off.
+
+`enforce-from` is the cutoff. PRs opened before it report green as grandfathered:
+
+```yaml
+jobs:
+  code-review-check:
+    uses: dreamteamapp/.github/.github/workflows/code-review-attestation-check.yml@master
+    with:
+      enforce-from: "2026-08-18"
+```
+
+Accepts `YYYY-MM-DD` (midnight UTC) or a full `YYYY-MM-DDTHH:MM:SSZ`. Two things to know:
+
+- A grandfathered PR stays ungated for life, however many commits it gains. That is the price of not wedging the backlog. Delete the input once the repo's old PRs have drained and the repo is fully gated from then on.
+- A cutoff the check cannot parse **fails the check** rather than being ignored, because ignoring it would exempt every PR in the repo silently. The month and day are range-checked too, not just their digit count: `2026-13-01` is a day/month transposition that sorts after every real date in 2026, so accepting it would have grandfathered a whole repo until 2100 under a green check.
+- Two things it still accepts, both bounded in how wrong they can be. A day that does not exist in that month (`2026-02-30`) sorts between the last real day of February and the first of March, so the cutoff lands a day or two out. And a valid date far in the future (`2126-08-18`) exempts everything, because nothing can distinguish a typo'd year from a deliberate one — but every PR it exempts says so in its own check summary, naming the cutoff.
+
+A repo with no PR backlog should skip the input entirely and gate everything.
 
 #### Also create the label
 

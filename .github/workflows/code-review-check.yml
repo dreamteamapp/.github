@@ -40,3 +40,9 @@ permissions: {}
 jobs:
   code-review-check:
     uses: ./.github/workflows/code-review-attestation-check.yml
+    # No `enforce-from` here on purpose. This repo has no open-PR backlog, so it
+    # gates everything. `enforce-from` was verified live on this branch in 444396b
+    # and reverted in the next commit: the run went green as exempt_grandfathered
+    # on a body with no marker, which is the only available proof that a `with:`
+    # input crosses workflow_call, since the expression layer has no local
+    # interpreter to test against.
