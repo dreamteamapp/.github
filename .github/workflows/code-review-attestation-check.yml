@@ -95,7 +95,7 @@ jobs:
 
           # One step, one verdict. Every branch below writes exactly one of:
           #   pass | pass_stale | exempt_merge_group | exempt_bot | exempt_label
-          #   fail_missing | fail_malformed
+          #   fail_missing | fail_malformed | fail_example
           emit() { echo "verdict=$1" >> "$GITHUB_OUTPUT"; echo "$2"; }
 
           if [ "$EVENT_NAME" = "merge_group" ]; then
@@ -137,15 +137,36 @@ jobs:
             exit 0
           fi
 
-          if ! printf '%s' "$PR_BODY" | grep -qiE '<!--[[:space:]]*code-review:'; then
-            emit fail_missing "❌ PR description carries no code-review marker"
+          # Strip fenced code blocks and inline code spans before looking for a
+          # marker. A documented EXAMPLE is not an attestation — and this is not
+          # hypothetical: the first live run of this check PASSED on the pull
+          # request that introduced it, matching the sample marker printed in its
+          # own description. A repo PR template carrying an example would have
+          # done the same thing to every PR in that repo, permanently and
+          # silently.
+          #
+          # An unclosed fence swallows the rest of the body, so a real marker
+          # after one reads as absent. That fails CLOSED and says which case it
+          # is, which is the safe direction: the author sees a specific message
+          # and fixes the body.
+          SANITIZED=$(printf '%s' "$PR_BODY" | awk '
+            /^[[:space:]]*(```|~~~)/ { in_fence = !in_fence; next }
+            !in_fence { print }
+          ' | sed 's/`[^`]*`//g')
+
+          if ! printf '%s' "$SANITIZED" | grep -qiE '<!--[[:space:]]*code-review:'; then
+            if printf '%s' "$PR_BODY" | grep -qiE '<!--[[:space:]]*code-review:'; then
+              emit fail_example "❌ The only code-review marker is inside a code block, so it is an example rather than an attestation"
+            else
+              emit fail_missing "❌ PR description carries no code-review marker"
+            fi
             exit 0
           fi
 
           # The marker has to be closed on one line to be extractable. An
           # unclosed or line-wrapped one is malformed rather than absent, and
           # says so — "add a marker" is unhelpful advice when there is one.
-          MARKER=$(printf '%s' "$PR_BODY" | grep -oiE '<!--[[:space:]]*code-review:[^>]*-->' | head -1 || true)
+          MARKER=$(printf '%s' "$SANITIZED" | grep -oiE '<!--[[:space:]]*code-review:[^>]*-->' | head -1 || true)
           if [ -z "$MARKER" ]; then
             emit fail_malformed "❌ code-review marker is not closed on a single line"
             exit 0
@@ -239,6 +260,15 @@ jobs:
                 echo "" >> "$S"
                 echo "A \`code-review\` marker is present but unusable. Fix it rather than" >> "$S"
                 echo "removing it — it must sit on ONE line and carry \`sha=<7-40 hex chars>\`." >> "$S"
+              elif [ "$VERDICT" = "fail_example" ]; then
+                echo "### ❌ FAILED — that marker is an example, not an attestation" >> "$S"
+                echo "" >> "$S"
+                echo "The only \`code-review\` marker in this description sits inside a code" >> "$S"
+                echo "block, so it is documentation. Markers inside fenced blocks and inline" >> "$S"
+                echo "backticks are ignored deliberately: otherwise a PR template carrying a" >> "$S"
+                echo "sample would pass every PR in the repo, silently and forever." >> "$S"
+                echo "" >> "$S"
+                echo "Add a real one outside any code block." >> "$S"
               else
                 echo "### ❌ FAILED — no code review attestation" >> "$S"
                 echo "" >> "$S"
@@ -276,12 +306,20 @@ jobs:
           echo "=========================================="
           if [ "$VERDICT" = "fail_malformed" ]; then
             echo "❌ CODE REVIEW ATTESTATION MALFORMED"
+          elif [ "$VERDICT" = "fail_example" ]; then
+            echo "❌ CODE REVIEW ATTESTATION IS AN EXAMPLE, NOT A REAL ONE"
           else
             echo "❌ CODE REVIEW ATTESTATION MISSING"
           fi
           echo "=========================================="
           echo ""
-          echo "No usable code-review marker was found in the PR description."
+          if [ "$VERDICT" = "fail_example" ]; then
+            echo "The only code-review marker in the description is inside a code block."
+            echo "Markers in fenced blocks and inline backticks are ignored, or a PR"
+            echo "template carrying a sample would pass every PR in the repo."
+          else
+            echo "No usable code-review marker was found in the PR description."
+          fi
           echo ""
           echo "To fix this, do ONE of:"
           echo ""

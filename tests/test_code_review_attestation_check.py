@@ -67,6 +67,15 @@ CASES = [
     # The PR body is attacker-controlled text. It must never reach a shell.
     ("body attempts injection",      {"PR_BODY": '$(touch /tmp/pwned-cra) `id` ${IFS} "; touch /tmp/pwned2-cra; #'}, "fail_missing"),
     ("marker plus injection",        {"PR_BODY": f'{GOOD}\n$(touch /tmp/pwned3-cra)'},            "pass"),
+    # Regression: the first live run of this check PASSED on the PR that added
+    # it, matching the sample marker in its own description. A repo PR template
+    # carrying an example would have done that to every PR in the repo.
+    ("example in a ``` fence",       {"PR_BODY": f"Format:\n\n```\n{GOOD}\n```\n"},               "fail_example"),
+    ("example in a ~~~ fence",       {"PR_BODY": f"Format:\n\n~~~text\n{GOOD}\n~~~\n"},           "fail_example"),
+    ("example in a ```yaml fence",   {"PR_BODY": f"```yaml\n{GOOD}\n```"},                        "fail_example"),
+    ("example in inline backticks",  {"PR_BODY": f"Add `{GOOD}` to the body."},                   "fail_example"),
+    ("real marker beats an example", {"PR_BODY": f"```\n{GOOD}\n```\n\n{GOOD}\n"},                "pass"),
+    ("unclosed fence fails closed",  {"PR_BODY": f"```\nsomething\n\n{GOOD}\n"},                  "fail_example"),
 ] + [
     (f"emitted by {m.split('skill=')[1].split()[0]}", {"PR_BODY": m}, "pass") for m in EMITTED
 ]
@@ -129,7 +138,7 @@ def main():
     if job.get("if") is not None:
         failures.append(("job carries an `if:` — a skipped required check never reports success", "no if", str(job["if"]), 0, "", ""))
 
-    for verdict in ("pass", "pass_stale", "exempt_label", "exempt_bot", "exempt_merge_group", "fail_missing", "fail_malformed"):
+    for verdict in ("pass", "pass_stale", "exempt_label", "exempt_bot", "exempt_merge_group", "fail_missing", "fail_malformed", "fail_example"):
         proc, rendered = run_summary(verdict)
         ok = proc.returncode == 0 and len(rendered.strip()) > 40
         print(f"{'PASS' if ok else 'FAIL'}  summary renders: {verdict}")
