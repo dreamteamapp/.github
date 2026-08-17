@@ -212,6 +212,21 @@ def structural_checks(failures):
     check(not any(v.startswith("fail") for v in GREEN), "no green verdict starts with 'fail'", failures)
     check(set(EXPECTED_HEADING) == FAILING | GREEN, "every verdict has an asserted heading", failures)
 
+    # The sanitizer is awk, and mawk is Debian and Ubuntu's default /usr/bin/awk.
+    # Builds of it without POSIX interval support treat `{3,}` as a pattern that
+    # never matches, which does not error - it silently no-ops the fence
+    # detection and lets every documented example pass as a real attestation,
+    # while this suite goes green on whichever awk the author happens to have.
+    # test-workflows.yml runs the suite under mawk as well as the runner default;
+    # this assertion is the cheaper half, and it fails at review time rather than
+    # on whichever runner resolves awk differently.
+    awk_program = re.search(r"awk '(.*?)'", script, re.S)
+    check(awk_program is not None, "the decide step still contains an awk program", failures)
+    if awk_program:
+        check(not re.search(r"\{\d+,\d*\}", awk_program.group(1)),
+              "awk program uses no interval regex (mawk may not support one)", failures,
+              awk_program.group(1)[:200])
+
     # Fixture-vs-contract mirrors. Renaming a declared env key in the YAML alone
     # kills the step under `set -u` on the first PR in every consuming repo.
     check(set(DEFAULTS) == set(steps["decide"]["env"]),

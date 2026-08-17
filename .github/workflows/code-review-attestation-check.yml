@@ -147,18 +147,30 @@ jobs:
           #    Matching exactly one on each side strips odd-length runs and
           #    leaves even ones intact, so ``a marker in double backticks``
           #    survived with its delimiters removed and read as an attestation.
+          # NO interval regexes (`{3,}`) anywhere in this awk program. mawk is
+          # Debian and Ubuntu's default /usr/bin/awk and does not support them,
+          # even under POSIXLY_CORRECT — the pattern simply never matches, so
+          # `in_fence` is never set and every fenced example passes through as a
+          # real attestation. A sanitizer that silently no-ops on one awk
+          # implementation is worse than no sanitizer, because the tests here go
+          # green on the implementation the author happens to have. Fence runs are
+          # therefore measured by counting characters, which every awk does the
+          # same way, and `test-workflows.yml` runs this suite under mawk as well
+          # as the runner default so the portability is enforced, not assumed.
           SANITIZED=$(printf '%s' "$PR_BODY" | awk '
             {
               line = $0
-              if (match(line, /^[[:space:]]*(`{3,}|~{3,})/)) {
-                run = line
-                sub(/^[[:space:]]*/, "", run)
-                char = substr(run, 1, 1)
+              stripped = line
+              sub(/^[ \t]*/, "", stripped)
+              char = substr(stripped, 1, 1)
+              if (char == "`" || char == "~") {
                 len = 0
-                while (substr(run, len + 1, 1) == char) len++
-                if (!in_fence) { in_fence = 1; fence_char = char; fence_len = len }
-                else if (char == fence_char && len >= fence_len) { in_fence = 0 }
-                next
+                while (substr(stripped, len + 1, 1) == char) len++
+                if (len >= 3) {
+                  if (!in_fence) { in_fence = 1; fence_char = char; fence_len = len }
+                  else if (char == fence_char && len >= fence_len) { in_fence = 0 }
+                  next
+                }
               }
               if (!in_fence) print line
             }
