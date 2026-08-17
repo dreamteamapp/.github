@@ -1,0 +1,42 @@
+name: Code Review Check
+
+# This repository's own caller — and the reference every other repo copies.
+#
+# In another repo, point at this one by ref instead of by path:
+#
+#   jobs:
+#     code-review-check:
+#       uses: dreamteamapp/.github/.github/workflows/code-review-attestation-check.yml@master
+#
+# TWO THINGS ARE LOAD-BEARING AND EASY TO GET WRONG WHEN COPYING:
+#
+#  1. The job id must be `code-review-check` in every repo. The required-check
+#     context is `<job id> / Verify Code Review Attestation`, and a ruleset names
+#     exactly one string — rename the job here and this repo silently drops out
+#     of the gate while still showing a green check.
+#
+#  2. Keep the `merge_group` trigger. A merge queue re-runs required checks
+#     against a ref with no pull request attached; the reusable workflow
+#     short-circuits that to a pass, but only if it is invoked at all. Without
+#     this trigger the check never reports on a queued merge, and a required
+#     check that never reports blocks the merge forever.
+
+on:
+  pull_request:
+    # `edited` is what makes the check re-run when the attestation is pasted into
+    # the body, and `labeled` / `unlabeled` are what make the exemption label
+    # take effect without an unrelated push.
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+  merge_group:
+
+concurrency:
+  group: code-review-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# The reusable workflow reads only the event payload and writes to
+# $GITHUB_STEP_SUMMARY — no GITHUB_TOKEN API access needed.
+permissions: {}
+
+jobs:
+  code-review-check:
+    uses: ./.github/workflows/code-review-attestation-check.yml

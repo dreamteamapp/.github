@@ -33,6 +33,15 @@ DEFAULTS = {
 
 GOOD = "<!-- code-review: sha=d0e3576 lanes=7 findings=3 blockers=0 at=2026-08-17T10:04Z skill=quad-plus-review -->"
 
+# The exact shapes the emitters in dreamteamapp/shapes-knowledge write. These are
+# a cross-repo contract: the skills live in another repository and cannot import
+# this regex, so the format they document is pinned here instead. A change to
+# either side that is not made on both breaks the gate for everyone.
+EMITTED = [
+    "<!-- code-review: sha=d0e3576 findings=3 blockers=0 at=2026-08-17T10:04Z skill=review-pr -->",
+    "<!-- code-review: sha=d0e3576 findings=0 blockers=0 at=2026-08-17T10:04Z skill=code-review -->",
+]
+
 CASES = [
     ("merge queue ref",              {"EVENT_NAME": "merge_group"},                              "exempt_merge_group"),
     ("merge queue beats a bad body", {"EVENT_NAME": "merge_group", "PR_BODY": "no marker here"},  "exempt_merge_group"),
@@ -58,6 +67,8 @@ CASES = [
     # The PR body is attacker-controlled text. It must never reach a shell.
     ("body attempts injection",      {"PR_BODY": '$(touch /tmp/pwned-cra) `id` ${IFS} "; touch /tmp/pwned2-cra; #'}, "fail_missing"),
     ("marker plus injection",        {"PR_BODY": f'{GOOD}\n$(touch /tmp/pwned3-cra)'},            "pass"),
+] + [
+    (f"emitted by {m.split('skill=')[1].split()[0]}", {"PR_BODY": m}, "pass") for m in EMITTED
 ]
 
 
