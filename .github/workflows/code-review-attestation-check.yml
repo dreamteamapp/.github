@@ -1,0 +1,341 @@
+name: Code Review Attestation Check
+
+# Blocks a PR that carries no evidence a code review was run on it — the review
+# equivalent of monday-item-check, and deliberately built the same way: it reads
+# text out of the PR and asserts a marker is there. It does NOT run a review, and
+# it never judges what a review found.
+#
+# The marker is written into the PR body by the `review-pr` / `code-review`
+# skills (dreamteamapp/shapes-knowledge -> skills/review-pr/SKILL.md). A human
+# can write it by hand just as well — the format is in the failure summary, so a
+# teammate with no skills installed is never stuck:
+#
+#   <!-- code-review: sha=a3f9c21 lanes=7 findings=3 blockers=0 at=2026-08-17T10:04Z skill=quad-plus-review -->
+#
+# The verdict gates on `sha` alone. `skill` is also read, to name the emitter in
+# the run summary. The rest is audit detail for whoever reads the PR six months
+# later.
+#
+# TRUST MODEL — this is an attestation, not proof, exactly as the Monday item ID
+# attests that a ticket exists. Someone can paste a marker they did not earn.
+# That is accepted: the check exists to stop a review being FORGOTTEN, not to
+# defeat someone determined to skip one. The marker plus the PR's own edit
+# history is the audit trail.
+#
+# THREE THINGS THIS FILE DOES DELIBERATELY, each one paid for by a past incident:
+#
+#  1. Nothing is exempted with a job-level `if:`. A skipped job never reports
+#     success, and a required status check is NOT satisfied by a skip — that is
+#     the standing Changesets deadlock, where every bot-authored release PR sits
+#     permanently BLOCKED and needs an org admin to hand-bypass it. Every
+#     exemption here RUNS and reports green.
+#
+#  2. `merge_group` short-circuits to a pass. A merge queue re-runs required
+#     checks against a temporary ref with NO pull request attached, where every
+#     `github.event.pull_request.*` field reads empty. The Monday gate resolves
+#     its item id only from PR-context sources, so it cannot pass on such a ref —
+#     and its callers declare no `merge_group` trigger today, so it does not run
+#     there at all, which blocks a queued merge just as hard, since a required
+#     check that never reports is never satisfied. Add the trigger without
+#     patching the gate and it fails instead of hanging. Either way no merge
+#     queue can be switched on in this org, and a second PR-body-reading required
+#     check must not add to that.
+#
+#  3. The failure step is gated on a POSITIVE verdict, not on a pile of
+#     `!= 'true'` comparisons. Skipped steps produce empty outputs, so negative
+#     conditions all hold and a failure step fires exactly when it should not.
+#     One decision step computes one verdict; the fail step reads it.
+
+on:
+  workflow_call:
+    inputs:
+      exempt-label:
+        description: >-
+          Label that exempts a PR from carrying an attestation. Applying it is a
+          deliberate, attributable act — the PR timeline records who added it —
+          which is why the exemption is a label rather than a diff-size
+          threshold. A two-line permissions change is small and still needs a
+          review.
+        required: false
+        type: string
+        default: no-review-needed
+
+# Reads only the event payload and writes $GITHUB_STEP_SUMMARY — no GITHUB_TOKEN
+# API access, same as monday-item-check. Verifying that the attested SHA is one
+# of the PR's own commits would need `pull-requests: read`; the head SHA already
+# arrives in the payload for free, so the staleness check below costs nothing and
+# this workflow stays at zero permissions.
+permissions: {}
+
+jobs:
+  check-review-attestation:
+    name: Verify Code Review Attestation
+    runs-on: ubuntu-latest
+
+    # No `if:` here. See note 1 in the header — this job must always report.
+
+    steps:
+      - name: Decide
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
+          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          # GitHub evaluates `contains()` over a label array case-INSENSITIVELY,
+          # so `No-Review-Needed` exempts a PR too. On a merge_group ref the
+          # array is absent and this resolves false, which is harmless only
+          # because the merge_group branch below short-circuits first — that
+          # ordering is load-bearing.
+          HAS_EXEMPT_LABEL: ${{ contains(github.event.pull_request.labels.*.name, inputs.exempt-label) }}
+          EXEMPT_LABEL: ${{ inputs.exempt-label }}
+        run: |
+          set -eu
+
+          # One step, one verdict. Every branch below writes exactly one of:
+          #   pass | pass_stale | exempt_merge_group | exempt_bot | exempt_label
+          #   fail_missing | fail_malformed | fail_example
+          emit() { echo "verdict=$1" >> "$GITHUB_OUTPUT"; echo "$2"; }
+
+          if [ "$EVENT_NAME" = "merge_group" ]; then
+            emit exempt_merge_group "✅ merge_group ref — the attestation was already verified at the PR"
+            exit 0
+          fi
+
+          # `user.type` covers GitHub Apps and bot accounts; the `[bot]` suffix
+          # catches the same thing on events where type is not populated.
+          case "$AUTHOR_LOGIN" in
+            *"[bot]") LOGIN_LOOKS_LIKE_BOT=true ;;
+            *) LOGIN_LOOKS_LIKE_BOT=false ;;
+          esac
+
+          if [ "$AUTHOR_TYPE" = "Bot" ] || [ "$LOGIN_LOOKS_LIKE_BOT" = true ]; then
+            echo "author=$AUTHOR_LOGIN" >> "$GITHUB_OUTPUT"
+            emit exempt_bot "✅ PR authored by $AUTHOR_LOGIN — bots carry no review attestation"
+            exit 0
+          fi
+
+          if [ "$HAS_EXEMPT_LABEL" = "true" ]; then
+            emit exempt_label "✅ PR carries the '$EXEMPT_LABEL' label — attestation not required"
+            exit 0
+          fi
+
+          # Strip fenced code blocks and inline code spans before looking for a
+          # marker. A documented EXAMPLE is not an attestation — and this is not
+          # hypothetical: the first live run of this check PASSED on the pull
+          # request that introduced it, matching the sample marker printed in its
+          # own description. A repo PR template carrying an example would have
+          # done the same thing to every PR in that repo, permanently and
+          # silently.
+          #
+          # An unclosed fence swallows the rest of the body, so a real marker
+          # after one reads as absent. That fails CLOSED and says which case it
+          # is, which is the safe direction: the author sees a specific message
+          # and fixes the body.
+          #
+          # Both passes follow CommonMark's own delimiter rules rather than
+          # matching a fixed length, because both shortcuts leak:
+          #
+          #  - A fence closes only on the SAME character, at the SAME length or
+          #    longer. Toggling on any run of three would treat the inner ``` of
+          #    a ````-wrapped example as a close, reopen the body mid-example,
+          #    and hand the marker back as real. Nesting a shorter fence is the
+          #    documented GFM way to show a fenced example, so this is the shape
+          #    a PR explaining the marker format is most likely to have.
+          #  - An inline span is delimited by a RUN of backticks of equal length.
+          #    Matching exactly one on each side strips odd-length runs and
+          #    leaves even ones intact, so ``a marker in double backticks``
+          #    survived with its delimiters removed and read as an attestation.
+          # NO interval regexes (`{3,}`) anywhere in this awk program. mawk is
+          # Debian and Ubuntu's default /usr/bin/awk and does not support them,
+          # even under POSIXLY_CORRECT — the pattern simply never matches, so
+          # `in_fence` is never set and every fenced example passes through as a
+          # real attestation. A sanitizer that silently no-ops on one awk
+          # implementation is worse than no sanitizer, because the tests here go
+          # green on the implementation the author happens to have. Fence runs are
+          # therefore measured by counting characters, which every awk does the
+          # same way, and `test-workflows.yml` runs this suite under mawk as well
+          # as the runner default so the portability is enforced, not assumed.
+          SANITIZED=$(printf '%s' "$PR_BODY" | awk '
+            {
+              line = $0
+              stripped = line
+              sub(/^[ \t]*/, "", stripped)
+              char = substr(stripped, 1, 1)
+              if (char == "`" || char == "~") {
+                len = 0
+                while (substr(stripped, len + 1, 1) == char) len++
+                if (len >= 3) {
+                  if (!in_fence) { in_fence = 1; fence_char = char; fence_len = len }
+                  else if (char == fence_char && len >= fence_len) { in_fence = 0 }
+                  next
+                }
+              }
+              if (!in_fence) print line
+            }
+          ' | sed -E 's/`+[^`]*`+//g')
+
+          if ! printf '%s' "$SANITIZED" | grep -qiE '<!--[[:space:]]*code-review:'; then
+            if printf '%s' "$PR_BODY" | grep -qiE '<!--[[:space:]]*code-review:'; then
+              emit fail_example "❌ The only code-review marker is inside a code block, so it is an example rather than an attestation"
+            else
+              emit fail_missing "❌ PR description carries no code-review marker"
+            fi
+            exit 0
+          fi
+
+          # The marker has to be closed on one line to be extractable. An
+          # unclosed or line-wrapped one is malformed rather than absent, and
+          # says so — "add a marker" is unhelpful advice when there is one.
+          MARKER=$(printf '%s' "$SANITIZED" | grep -oiE '<!--[[:space:]]*code-review:[^>]*-->' | head -1 || true)
+          if [ -z "$MARKER" ]; then
+            emit fail_malformed "❌ code-review marker is not closed on a single line"
+            exit 0
+          fi
+          echo "Marker: $MARKER"
+
+          # A marker with no usable SHA is treated as malformed rather than waved
+          # through: it means whatever emitted it is broken, and a silent green
+          # would hide that for every PR after this one.
+          SHA=$(printf '%s' "$MARKER" | grep -oiE 'sha=[0-9a-fA-F]{7,40}' | head -1 | cut -d= -f2 | tr '[:upper:]' '[:lower:]' || true)
+          if [ -z "$SHA" ]; then
+            emit fail_malformed "❌ Marker is present but carries no valid sha=<7-40 hex chars>"
+            exit 0
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+          SKILL=$(printf '%s' "$MARKER" | grep -oiE 'skill=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2 || true)
+          echo "skill=${SKILL:-unspecified}" >> "$GITHUB_OUTPUT"
+
+          # The attested SHA may be short or full, so match on prefix. Staleness
+          # is information, never a gate: a review necessarily runs BEFORE the
+          # commit that applies its own findings, so a moved head is the normal
+          # end state of a review that was acted on.
+          case "$HEAD_SHA" in
+            "$SHA"*)
+              emit pass "✅ Attestation covers the current head ($SHA)"
+              ;;
+            *)
+              emit pass_stale "⚠️ Head moved since the review (reviewed $SHA, head is $HEAD_SHA)"
+              ;;
+          esac
+
+      - name: Generate Summary
+        id: summary
+        env:
+          VERDICT: ${{ steps.decide.outputs.verdict }}
+          ATTESTED_SHA: ${{ steps.decide.outputs.sha }}
+          ATTESTED_SKILL: ${{ steps.decide.outputs.skill }}
+          EXEMPT_AUTHOR: ${{ steps.decide.outputs.author }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EXEMPT_LABEL: ${{ inputs.exempt-label }}
+        run: |
+          set -eu
+
+          S="$GITHUB_STEP_SUMMARY"
+          NOW=$(date -u +%Y-%m-%dT%H:%MZ)
+
+          echo "## Code Review Attestation Check" >> "$S"
+          echo "" >> "$S"
+
+          case "$VERDICT" in
+            pass|pass_stale)
+              echo "### ✅ PASSED" >> "$S"
+              echo "" >> "$S"
+              echo "| | |" >> "$S"
+              echo "|---|---|" >> "$S"
+              echo "| Reviewed at | \`$ATTESTED_SHA\` |" >> "$S"
+              echo "| Current head | \`$HEAD_SHA\` |" >> "$S"
+              echo "| Emitted by | \`$ATTESTED_SKILL\` |" >> "$S"
+              echo "" >> "$S"
+              if [ "$VERDICT" = "pass" ]; then
+                echo "The attestation covers the current head." >> "$S"
+              else
+                echo "⚠️ **The head has moved since this review.** The attestation covers" >> "$S"
+                echo "\`$ATTESTED_SHA\`; the current head is \`$HEAD_SHA\`. That is the expected" >> "$S"
+                echo "state directly after applying a review's findings — but if the commits" >> "$S"
+                echo "since then were substantive, re-run the review." >> "$S"
+              fi
+              ;;
+            exempt_label)
+              echo "### ✅ EXEMPT — label" >> "$S"
+              echo "" >> "$S"
+              echo "This PR carries \`$EXEMPT_LABEL\`, so no attestation is required." >> "$S"
+              echo "Who applied the label is recorded in the PR timeline." >> "$S"
+              ;;
+            exempt_bot)
+              echo "### ✅ EXEMPT — automated PR" >> "$S"
+              echo "" >> "$S"
+              echo "Authored by \`$EXEMPT_AUTHOR\`. Automation carries no review attestation," >> "$S"
+              echo "and this check reports green rather than skipping — a skipped job never" >> "$S"
+              echo "reports success, and a required check is not satisfied by a skip." >> "$S"
+              ;;
+            exempt_merge_group)
+              echo "### ✅ EXEMPT — merge queue" >> "$S"
+              echo "" >> "$S"
+              echo "A \`merge_group\` ref has no pull request attached, so there is no body to" >> "$S"
+              echo "read. The attestation was verified on the PR before it entered the queue." >> "$S"
+              ;;
+            *)
+              if [ "$VERDICT" = "fail_malformed" ]; then
+                echo "### ❌ FAILED — attestation is malformed" >> "$S"
+                echo "" >> "$S"
+                echo "A \`code-review\` marker is present but unusable. Fix it rather than" >> "$S"
+                echo "removing it — it must sit on ONE line and carry \`sha=<7-40 hex chars>\`." >> "$S"
+              elif [ "$VERDICT" = "fail_example" ]; then
+                echo "### ❌ FAILED — that marker is an example, not an attestation" >> "$S"
+                echo "" >> "$S"
+                echo "The only \`code-review\` marker in this description sits inside a code" >> "$S"
+                echo "block, so it is documentation. Markers inside fenced blocks and inline" >> "$S"
+                echo "backticks are ignored deliberately: otherwise a PR template carrying a" >> "$S"
+                echo "sample would pass every PR in the repo, silently and forever." >> "$S"
+                echo "" >> "$S"
+                echo "Add a real one outside any code block." >> "$S"
+              else
+                echo "### ❌ FAILED — no code review attestation" >> "$S"
+                echo "" >> "$S"
+                echo "This PR carries no evidence that a code review was run on it." >> "$S"
+              fi
+              echo "" >> "$S"
+              echo "**To fix, pick one:**" >> "$S"
+              echo "" >> "$S"
+              echo "1. **Run the review** — \`/review-pr\` writes the attestation into the PR" >> "$S"
+              echo "   body for you. This check re-runs the moment the body is edited." >> "$S"
+              echo "2. **Write it by hand** — append this to the PR description:" >> "$S"
+              echo "" >> "$S"
+              echo "   \`\`\`" >> "$S"
+              echo "   <!-- code-review: sha=${HEAD_SHA:-<your head sha>} at=$NOW skill=manual -->" >> "$S"
+              echo "   \`\`\`" >> "$S"
+              echo "" >> "$S"
+              echo "3. **Exempt the PR** — add the \`$EXEMPT_LABEL\` label if this change" >> "$S"
+              echo "   genuinely does not warrant a review (a typo, a one-line config bump)." >> "$S"
+              echo "   The label and who added it are recorded in the PR timeline." >> "$S"
+              ;;
+          esac
+
+      # Positive condition, for two reasons. Four verdicts are legitimately GREEN
+      # and none of them is `pass` — `pass_stale`, `exempt_bot`, `exempt_label`,
+      # `exempt_merge_group` — so a negative gate (`!= 'pass'`) would fail every
+      # exempted and every stale-but-reviewed PR. It would also fire on the EMPTY
+      # output a skipped step leaves behind. See note 3 in the header.
+      - name: Fail if No Attestation
+        id: fail
+        if: startsWith(steps.decide.outputs.verdict, 'fail')
+        env:
+          VERDICT: ${{ steps.decide.outputs.verdict }}
+          EXEMPT_LABEL: ${{ inputs.exempt-label }}
+        run: |
+          set -eu
+
+          # Deliberately short. The three ways to fix this, spelled out, are in
+          # the job summary on this same page — repeating them here only put the
+          # same prose in two places that then drift apart.
+          case "$VERDICT" in
+            fail_malformed) echo "❌ CODE REVIEW ATTESTATION MALFORMED" ;;
+            fail_example)   echo "❌ CODE REVIEW ATTESTATION IS AN EXAMPLE, NOT A REAL ONE" ;;
+            *)              echo "❌ CODE REVIEW ATTESTATION MISSING" ;;
+          esac
+          echo "See the job summary above for how to fix it, including the exact"
+          echo "line to paste and the '$EXEMPT_LABEL' label."
+          exit 1

@@ -1,0 +1,66 @@
+name: Test Workflows
+
+# This repository's workflows are consumed by every repo in the org, so a broken
+# one breaks everybody's CI at once and there is no local way to try it. These
+# tests pull each workflow's shell out of the YAML and exercise it directly, so a
+# regression shows up here rather than on 26 repos' pull requests.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "tests/**"
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/**"
+      - "tests/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test Reusable Workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      # The runner image ships Python 3, and PyYAML is the only dependency — a
+      # setup-python step would be a second pinned action for no gain.
+      - run: python3 -m pip install --quiet 'pyyaml==6.0.2'
+
+      - name: Record which awk this runner resolves to
+        run: |
+          set -eu
+          echo "awk: $(command -v awk)"
+          awk --version 2>/dev/null | head -1 || awk -W version 2>&1 | head -1 || true
+          update-alternatives --list awk 2>/dev/null || echo "(no awk alternatives)"
+
+      # Glob rather than naming one file: a test added to tests/ that the runner
+      # does not know about is a test that never runs, and nothing says so.
+      - name: Test with the runner's default awk
+        run: |
+          set -eu
+          for t in tests/test_*.py; do
+            echo "--- $t"
+            python3 "$t"
+          done
+
+      - name: Test with mawk
+        # The fence sanitizer is awk code, and mawk is Debian and Ubuntu's default
+        # /usr/bin/awk. It does not support `{n,}` interval regexes, so a sanitizer
+        # written with one silently no-ops there and lets every fenced example pass
+        # as a real attestation - while the suite goes green on whichever awk the
+        # author happens to have. Running the same suite under both implementations
+        # is what makes "portable" a tested property instead of a claim.
+        run: |
+          set -eu
+          command -v mawk >/dev/null || sudo apt-get install -y --no-install-recommends mawk
+          mkdir -p "$RUNNER_TEMP/awk-shim"
+          ln -sf "$(command -v mawk)" "$RUNNER_TEMP/awk-shim/awk"
+          export PATH="$RUNNER_TEMP/awk-shim:$PATH"
+          echo "awk now: $(command -v awk)"
+          for t in tests/test_*.py; do
+            echo "--- $t"
+            python3 "$t"
+          done
