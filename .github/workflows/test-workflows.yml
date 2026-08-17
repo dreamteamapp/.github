@@ -1,0 +1,31 @@
+name: Test Workflows
+
+# This repository's workflows are consumed by every repo in the org, so a broken
+# one breaks everybody's CI at once and there is no local way to try it. These
+# tests pull each workflow's shell out of the YAML and exercise it directly, so a
+# regression shows up here rather than on 26 repos' pull requests.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "tests/**"
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/**"
+      - "tests/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test Reusable Workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      # The runner image ships Python 3, and PyYAML is the only dependency — a
+      # setup-python step would be a second pinned action for no gain.
+      - run: python3 -m pip install --quiet pyyaml
+      - run: python3 tests/test_code_review_attestation_check.py
