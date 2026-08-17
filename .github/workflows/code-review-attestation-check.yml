@@ -12,8 +12,9 @@ name: Code Review Attestation Check
 #
 #   <!-- code-review: sha=a3f9c21 lanes=7 findings=3 blockers=0 at=2026-08-17T10:04Z skill=quad-plus-review -->
 #
-# `sha` is the only field this check reads. The rest is audit detail for whoever
-# reads the PR six months later.
+# The verdict gates on `sha` alone. `skill` is also read, to name the emitter in
+# the run summary. The rest is audit detail for whoever reads the PR six months
+# later.
 #
 # TRUST MODEL — this is an attestation, not proof, exactly as the Monday item ID
 # attests that a ticket exists. Someone can paste a marker they did not earn.
@@ -31,9 +32,14 @@ name: Code Review Attestation Check
 #
 #  2. `merge_group` short-circuits to a pass. A merge queue re-runs required
 #     checks against a temporary ref with NO pull request attached, where every
-#     `github.event.pull_request.*` field reads empty. monday-item-check fails
-#     there, which is the single reason no merge queue can be switched on in this
-#     org. A second PR-body-reading required check must not add to that.
+#     `github.event.pull_request.*` field reads empty. The Monday gate resolves
+#     its item id only from PR-context sources, so it cannot pass on such a ref —
+#     and its callers declare no `merge_group` trigger today, so it does not run
+#     there at all, which blocks a queued merge just as hard, since a required
+#     check that never reports is never satisfied. Add the trigger without
+#     patching the gate and it fails instead of hanging. Either way no merge
+#     queue can be switched on in this org, and a second PR-body-reading required
+#     check must not add to that.
 #
 #  3. The failure step is gated on a POSITIVE verdict, not on a pile of
 #     `!= 'true'` comparisons. Skipped steps produce empty outputs, so negative
@@ -53,16 +59,6 @@ on:
         required: false
         type: string
         default: no-review-needed
-      exempt-authors:
-        description: >-
-          Extra comma-separated PR author logins to short-circuit to green, on
-          top of every account GitHub reports as a Bot. Needed because a cron
-          driving peter-evans/create-pull-request under a PAT authors as a human,
-          and rewrites the PR title and body on every run — so a marker added to
-          one of its PRs is erased on the next.
-        required: false
-        type: string
-        default: ""
 
 # Reads only the event payload and writes $GITHUB_STEP_SUMMARY — no GITHUB_TOKEN
 # API access, same as monday-item-check. Verifying that the attested SHA is one
@@ -87,9 +83,13 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
           AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          # GitHub evaluates `contains()` over a label array case-INSENSITIVELY,
+          # so `No-Review-Needed` exempts a PR too. On a merge_group ref the
+          # array is absent and this resolves false, which is harmless only
+          # because the merge_group branch below short-circuits first — that
+          # ordering is load-bearing.
           HAS_EXEMPT_LABEL: ${{ contains(github.event.pull_request.labels.*.name, inputs.exempt-label) }}
           EXEMPT_LABEL: ${{ inputs.exempt-label }}
-          EXEMPT_AUTHORS: ${{ inputs.exempt-authors }}
         run: |
           set -eu
 
@@ -116,22 +116,6 @@ jobs:
             exit 0
           fi
 
-          # Extra author logins, comma-separated, whitespace tolerated.
-          if [ -n "$EXEMPT_AUTHORS" ]; then
-            OLD_IFS=$IFS
-            IFS=,
-            for candidate in $EXEMPT_AUTHORS; do
-              trimmed=$(printf '%s' "$candidate" | tr -d '[:space:]')
-              if [ -n "$trimmed" ] && [ "$trimmed" = "$AUTHOR_LOGIN" ]; then
-                IFS=$OLD_IFS
-                echo "author=$AUTHOR_LOGIN" >> "$GITHUB_OUTPUT"
-                emit exempt_bot "✅ $AUTHOR_LOGIN is a configured exempt author"
-                exit 0
-              fi
-            done
-            IFS=$OLD_IFS
-          fi
-
           if [ "$HAS_EXEMPT_LABEL" = "true" ]; then
             emit exempt_label "✅ PR carries the '$EXEMPT_LABEL' label — attestation not required"
             exit 0
@@ -149,10 +133,36 @@ jobs:
           # after one reads as absent. That fails CLOSED and says which case it
           # is, which is the safe direction: the author sees a specific message
           # and fixes the body.
+          #
+          # Both passes follow CommonMark's own delimiter rules rather than
+          # matching a fixed length, because both shortcuts leak:
+          #
+          #  - A fence closes only on the SAME character, at the SAME length or
+          #    longer. Toggling on any run of three would treat the inner ``` of
+          #    a ````-wrapped example as a close, reopen the body mid-example,
+          #    and hand the marker back as real. Nesting a shorter fence is the
+          #    documented GFM way to show a fenced example, so this is the shape
+          #    a PR explaining the marker format is most likely to have.
+          #  - An inline span is delimited by a RUN of backticks of equal length.
+          #    Matching exactly one on each side strips odd-length runs and
+          #    leaves even ones intact, so ``a marker in double backticks``
+          #    survived with its delimiters removed and read as an attestation.
           SANITIZED=$(printf '%s' "$PR_BODY" | awk '
-            /^[[:space:]]*(```|~~~)/ { in_fence = !in_fence; next }
-            !in_fence { print }
-          ' | sed 's/`[^`]*`//g')
+            {
+              line = $0
+              if (match(line, /^[[:space:]]*(`{3,}|~{3,})/)) {
+                run = line
+                sub(/^[[:space:]]*/, "", run)
+                char = substr(run, 1, 1)
+                len = 0
+                while (substr(run, len + 1, 1) == char) len++
+                if (!in_fence) { in_fence = 1; fence_char = char; fence_len = len }
+                else if (char == fence_char && len >= fence_len) { in_fence = 0 }
+                next
+              }
+              if (!in_fence) print line
+            }
+          ' | sed -E 's/`+[^`]*`+//g')
 
           if ! printf '%s' "$SANITIZED" | grep -qiE '<!--[[:space:]]*code-review:'; then
             if printf '%s' "$PR_BODY" | grep -qiE '<!--[[:space:]]*code-review:'; then
@@ -200,6 +210,7 @@ jobs:
           esac
 
       - name: Generate Summary
+        id: summary
         env:
           VERDICT: ${{ steps.decide.outputs.verdict }}
           ATTESTED_SHA: ${{ steps.decide.outputs.sha }}
@@ -291,46 +302,28 @@ jobs:
               ;;
           esac
 
-      # Positive condition. A negative one (`!= 'pass'`) would fire on an empty
-      # output, which is exactly how a guarded failure step still fails a
-      # merge_group run. See note 3 in the header.
+      # Positive condition, for two reasons. Four verdicts are legitimately GREEN
+      # and none of them is `pass` — `pass_stale`, `exempt_bot`, `exempt_label`,
+      # `exempt_merge_group` — so a negative gate (`!= 'pass'`) would fail every
+      # exempted and every stale-but-reviewed PR. It would also fire on the EMPTY
+      # output a skipped step leaves behind. See note 3 in the header.
       - name: Fail if No Attestation
+        id: fail
         if: startsWith(steps.decide.outputs.verdict, 'fail')
         env:
           VERDICT: ${{ steps.decide.outputs.verdict }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           EXEMPT_LABEL: ${{ inputs.exempt-label }}
         run: |
-          NOW=$(date -u +%Y-%m-%dT%H:%MZ)
-          echo ""
-          echo "=========================================="
-          if [ "$VERDICT" = "fail_malformed" ]; then
-            echo "❌ CODE REVIEW ATTESTATION MALFORMED"
-          elif [ "$VERDICT" = "fail_example" ]; then
-            echo "❌ CODE REVIEW ATTESTATION IS AN EXAMPLE, NOT A REAL ONE"
-          else
-            echo "❌ CODE REVIEW ATTESTATION MISSING"
-          fi
-          echo "=========================================="
-          echo ""
-          if [ "$VERDICT" = "fail_example" ]; then
-            echo "The only code-review marker in the description is inside a code block."
-            echo "Markers in fenced blocks and inline backticks are ignored, or a PR"
-            echo "template carrying a sample would pass every PR in the repo."
-          else
-            echo "No usable code-review marker was found in the PR description."
-          fi
-          echo ""
-          echo "To fix this, do ONE of:"
-          echo ""
-          echo "  1. Run the review — '/review-pr' writes the attestation for you."
-          echo "     This check re-runs as soon as the PR body is edited."
-          echo ""
-          echo "  2. Add it to the PR description by hand:"
-          echo ""
-          echo "     <!-- code-review: sha=${HEAD_SHA:-<your head sha>} at=$NOW skill=manual -->"
-          echo ""
-          echo "  3. Label the PR '$EXEMPT_LABEL' if it genuinely does not warrant a review."
-          echo ""
-          echo "=========================================="
+          set -eu
+
+          # Deliberately short. The three ways to fix this, spelled out, are in
+          # the job summary on this same page — repeating them here only put the
+          # same prose in two places that then drift apart.
+          case "$VERDICT" in
+            fail_malformed) echo "❌ CODE REVIEW ATTESTATION MALFORMED" ;;
+            fail_example)   echo "❌ CODE REVIEW ATTESTATION IS AN EXAMPLE, NOT A REAL ONE" ;;
+            *)              echo "❌ CODE REVIEW ATTESTATION MISSING" ;;
+          esac
+          echo "See the job summary above for how to fix it, including the exact"
+          echo "line to paste and the '$EXEMPT_LABEL' label."
           exit 1

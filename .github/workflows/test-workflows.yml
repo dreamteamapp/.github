@@ -27,5 +27,12 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       # The runner image ships Python 3, and PyYAML is the only dependency — a
       # setup-python step would be a second pinned action for no gain.
-      - run: python3 -m pip install --quiet pyyaml
-      - run: python3 tests/test_code_review_attestation_check.py
+      - run: python3 -m pip install --quiet 'pyyaml==6.0.2'
+      # Glob rather than naming one file: a test added to tests/ that the runner
+      # does not know about is a test that never runs, and nothing says so.
+      - run: |
+          set -eu
+          for t in tests/test_*.py; do
+            echo "--- $t"
+            python3 "$t"
+          done
