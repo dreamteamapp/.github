@@ -31,8 +31,15 @@ steps = {s.get("id") or s["name"]: s for s in job["steps"]}
 script = steps["decide"]["run"]
 
 # The verdict vocabulary, split by the polarity the Fail step's `if:` depends on.
-FAILING = {"fail_missing", "fail_malformed", "fail_example"}
-GREEN = {"pass", "pass_stale", "exempt_label", "exempt_bot", "exempt_merge_group"}
+FAILING = {"fail_missing", "fail_malformed", "fail_example", "fail_config"}
+GREEN = {
+    "pass",
+    "pass_stale",
+    "exempt_label",
+    "exempt_bot",
+    "exempt_merge_group",
+    "exempt_grandfathered",
+}
 
 HEAD = "d0e3576f8aa1b2c3d4e5f60718293a4b5c6d7e8f"
 
@@ -44,6 +51,10 @@ DEFAULTS = {
     "AUTHOR_TYPE": "User",
     "HAS_EXEMPT_LABEL": "false",
     "EXEMPT_LABEL": "no-review-needed",
+    # Empty cutoff means "gate every PR", so every pre-existing case below keeps
+    # the behaviour it was written for and only the grandfather cases opt in.
+    "ENFORCE_FROM": "",
+    "PR_CREATED_AT": "2026-08-17T10:00:00Z",
 }
 
 GOOD = "<!-- code-review: sha=d0e3576 lanes=7 findings=3 blockers=0 at=2026-08-17T10:04Z skill=quad-plus-review -->"
@@ -63,6 +74,8 @@ EXPECTED_HEADING = {
     "exempt_label": "### ✅ EXEMPT — label",
     "exempt_bot": "### ✅ EXEMPT — automated PR",
     "exempt_merge_group": "### ✅ EXEMPT — merge queue",
+    "exempt_grandfathered": "### ✅ EXEMPT — opened before this repo started gating",
+    "fail_config": "### ❌ FAILED — this repo's check is misconfigured",
     "fail_missing": "### ❌ FAILED — no code review attestation",
     "fail_malformed": "### ❌ FAILED — attestation is malformed",
     "fail_example": "### ❌ FAILED — that marker is an example, not an attestation",
@@ -126,6 +139,38 @@ CASES = [
     ("KNOWN GAP indented block",     {"PR_BODY": f"Example:\n\n    {GOOD}\n"},                    "pass"),
     ("KNOWN GAP blockquote",         {"PR_BODY": f"> {GOOD}\n"},                                  "pass"),
     ("KNOWN GAP pre tag",            {"PR_BODY": f"<pre>{GOOD}</pre>"},                           "pass"),
+    # --- Grandfathering: a required check applies to every OPEN pull request ---
+    # --- the moment it becomes required, not only to new ones. Without a -----
+    # --- cutoff, turning this on wedges 445+ open human PRs in the pilot -----
+    # --- repos, some opened in 2022. -----------------------------------------
+    ("opened before the cutoff",     {"ENFORCE_FROM": "2026-08-17", "PR_CREATED_AT": "2026-05-01T10:00:00Z"}, "exempt_grandfathered"),
+    ("opened after the cutoff",      {"ENFORCE_FROM": "2026-08-17", "PR_CREATED_AT": "2026-08-18T09:00:00Z"}, "fail_missing"),
+    # The boundary is "at or after is gated", so a PR opened on the cutoff
+    # instant is IN. Flipping this to `<=` would silently exempt a day of PRs.
+    ("opened exactly at the cutoff", {"ENFORCE_FROM": "2026-08-17T00:00:00Z", "PR_CREATED_AT": "2026-08-17T00:00:00Z"}, "fail_missing"),
+    ("one second before cutoff",     {"ENFORCE_FROM": "2026-08-17T00:00:00Z", "PR_CREATED_AT": "2026-08-16T23:59:59Z"}, "exempt_grandfathered"),
+    ("date-only cutoff is midnight", {"ENFORCE_FROM": "2026-08-17", "PR_CREATED_AT": "2026-08-16T23:59:59Z"}, "exempt_grandfathered"),
+    # No cutoff configured must gate everything, however old. This is the
+    # default, and it is what .github's own caller relies on.
+    ("no cutoff gates an old PR",    {"PR_CREATED_AT": "2020-01-01T00:00:00Z"},                   "fail_missing"),
+    # Grandfathering runs before the sanitizer and before the bot check, so both
+    # precedences are pinned rather than left to the reader of the script.
+    ("grandfathered beats example",  {"ENFORCE_FROM": "2026-08-17", "PR_CREATED_AT": "2026-01-01T00:00:00Z", "PR_BODY": f"```\n{GOOD}\n```"}, "exempt_grandfathered"),
+    ("grandfathered beats bot",      {"ENFORCE_FROM": "2026-08-17", "PR_CREATED_AT": "2026-01-01T00:00:00Z", "AUTHOR_LOGIN": "dependabot[bot]"}, "exempt_grandfathered"),
+    # An absent created_at cannot establish that a PR predates the cutoff, so it
+    # is GATED. Exempting on a missing field is how a whole repo goes ungated.
+    ("empty created_at is gated",    {"ENFORCE_FROM": "2026-08-17", "PR_CREATED_AT": ""},         "fail_missing"),
+    # A cutoff this check cannot read must FAIL, never be ignored. Ignoring it
+    # would exempt every PR in the repo silently, for as long as nobody looked.
+    ("unreadable cutoff fails",      {"ENFORCE_FROM": "yesterday", "PR_CREATED_AT": "2020-01-01T00:00:00Z"}, "fail_config"),
+    ("US-format cutoff fails",       {"ENFORCE_FROM": "08/17/2026"},                              "fail_config"),
+    ("no-Z timestamp fails",         {"ENFORCE_FROM": "2026-08-17T00:00:00"},                     "fail_config"),
+    # Even a valid attestation does not paper over a broken cutoff: the repo's
+    # config is wrong and the whole repo needs to know, not just this PR.
+    ("bad cutoff beats a good marker", {"ENFORCE_FROM": "nope", "PR_BODY": GOOD},                 "fail_config"),
+    # merge_group short-circuits before the cutoff is even validated, so a queued
+    # merge cannot be broken by a repo's date typo.
+    ("merge queue beats bad cutoff", {"EVENT_NAME": "merge_group", "ENFORCE_FROM": "nope"},       "exempt_merge_group"),
 ]
 
 

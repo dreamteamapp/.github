@@ -60,6 +60,29 @@ on:
         type: string
         default: no-review-needed
 
+      enforce-from:
+        description: >-
+          Only gate pull requests OPENED at or after this instant; anything older
+          reports green as `exempt_grandfathered`. Accepts `YYYY-MM-DD` (treated
+          as 00:00:00Z) or a full `YYYY-MM-DDTHH:MM:SSZ`. Empty (the default)
+          gates every PR, which is the right setting for a repo adopting the
+          check from scratch.
+
+          This exists because a required status check applies to every OPEN pull
+          request the moment it becomes required, not just to new ones. The six
+          pilot repos carry 445+ open human PRs, some opened in 2022, and without
+          a cutoff every one of them becomes unmergeable until somebody re-reviews
+          it and edits its description. Nobody would do that; they would ask for
+          the check to be turned off instead.
+
+          The cost is real and deliberate: a grandfathered PR is never gated, no
+          matter how many commits it gains afterwards. That is the accepted price
+          of not wedging the backlog. Drop this input from a caller once the repo's
+          pre-cutoff PRs have drained, and the repo is fully gated from then on.
+        required: false
+        type: string
+        default: ""
+
 # Reads only the event payload and writes $GITHUB_STEP_SUMMARY — no GITHUB_TOKEN
 # API access, same as monday-item-check. Verifying that the attested SHA is one
 # of the PR's own commits would need `pull-requests: read`; the head SHA already
@@ -90,17 +113,55 @@ jobs:
           # ordering is load-bearing.
           HAS_EXEMPT_LABEL: ${{ contains(github.event.pull_request.labels.*.name, inputs.exempt-label) }}
           EXEMPT_LABEL: ${{ inputs.exempt-label }}
+          # Absent on a merge_group ref, like every other pull_request field. The
+          # grandfather branch below treats an empty value as NOT grandfathered,
+          # which is the safe direction: it gates rather than exempts when it
+          # cannot establish that the PR predates the cutoff.
+          PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
+          ENFORCE_FROM: ${{ inputs.enforce-from }}
         run: |
           set -eu
 
           # One step, one verdict. Every branch below writes exactly one of:
           #   pass | pass_stale | exempt_merge_group | exempt_bot | exempt_label
-          #   fail_missing | fail_malformed | fail_example
+          #   exempt_grandfathered
+          #   fail_missing | fail_malformed | fail_example | fail_config
           emit() { echo "verdict=$1" >> "$GITHUB_OUTPUT"; echo "$2"; }
 
           if [ "$EVENT_NAME" = "merge_group" ]; then
             emit exempt_merge_group "✅ merge_group ref — the attestation was already verified at the PR"
             exit 0
+          fi
+
+          # Grandfathering runs before any body parsing: it decides on a single
+          # payload field, and on an old PR it is the reason a reader most needs
+          # to see.
+          #
+          # A malformed cutoff FAILS LOUDLY instead of being ignored. Ignoring it
+          # would exempt every PR in every repo that set it, silently and for as
+          # long as nobody noticed — the same shape as the fenced-example bug, and
+          # equally invisible from a green check. A loud failure is one commit to
+          # fix; a silent universal exemption is a gate that was never on.
+          if [ -n "$ENFORCE_FROM" ]; then
+            case "$ENFORCE_FROM" in
+              [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
+                CUTOFF="${ENFORCE_FROM}T00:00:00Z" ;;
+              [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z)
+                CUTOFF="$ENFORCE_FROM" ;;
+              *)
+                emit fail_config "❌ enforce-from is not a usable cutoff: '$ENFORCE_FROM'"
+                exit 0
+                ;;
+            esac
+
+            # Both sides are fixed-width UTC ISO-8601, so comparing them as
+            # strings compares them chronologically. `date -d` is deliberately
+            # avoided: it is GNU-only, and this script is extracted and run
+            # directly by the test suite on whatever machine an author uses.
+            if [ -n "$PR_CREATED_AT" ] && [ "$PR_CREATED_AT" \< "$CUTOFF" ]; then
+              emit exempt_grandfathered "✅ PR opened $PR_CREATED_AT, before this repo began gating ($CUTOFF)"
+              exit 0
+            fi
           fi
 
           # `user.type` covers GitHub Apps and bot accounts; the `[bot]` suffix
@@ -230,6 +291,8 @@ jobs:
           EXEMPT_AUTHOR: ${{ steps.decide.outputs.author }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           EXEMPT_LABEL: ${{ inputs.exempt-label }}
+          PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
+          ENFORCE_FROM: ${{ inputs.enforce-from }}
         run: |
           set -eu
 
@@ -271,6 +334,15 @@ jobs:
               echo "and this check reports green rather than skipping — a skipped job never" >> "$S"
               echo "reports success, and a required check is not satisfied by a skip." >> "$S"
               ;;
+            exempt_grandfathered)
+              echo "### ✅ EXEMPT — opened before this repo started gating" >> "$S"
+              echo "" >> "$S"
+              echo "This PR was opened \`$PR_CREATED_AT\`; the repo gates PRs opened from" >> "$S"
+              echo "\`$ENFORCE_FROM\` onward. It is not gated, and it stays ungated for the" >> "$S"
+              echo "rest of its life even if it gains new commits." >> "$S"
+              echo "" >> "$S"
+              echo "A review is still worth running. Nothing here checks that one happened." >> "$S"
+              ;;
             exempt_merge_group)
               echo "### ✅ EXEMPT — merge queue" >> "$S"
               echo "" >> "$S"
@@ -278,7 +350,16 @@ jobs:
               echo "read. The attestation was verified on the PR before it entered the queue." >> "$S"
               ;;
             *)
-              if [ "$VERDICT" = "fail_malformed" ]; then
+              if [ "$VERDICT" = "fail_config" ]; then
+                echo "### ❌ FAILED — this repo's check is misconfigured" >> "$S"
+                echo "" >> "$S"
+                echo "\`enforce-from\` is set to \`$ENFORCE_FROM\`, which is not a date this" >> "$S"
+                echo "check can read. Expected \`YYYY-MM-DD\` or \`YYYY-MM-DDTHH:MM:SSZ\`." >> "$S"
+                echo "" >> "$S"
+                echo "This is a bug in this repository's caller workflow, not in your PR." >> "$S"
+                echo "It fails rather than being ignored on purpose: ignoring it would exempt" >> "$S"
+                echo "every PR in the repo without anyone noticing." >> "$S"
+              elif [ "$VERDICT" = "fail_malformed" ]; then
                 echo "### ❌ FAILED — attestation is malformed" >> "$S"
                 echo "" >> "$S"
                 echo "A \`code-review\` marker is present but unusable. Fix it rather than" >> "$S"
@@ -331,6 +412,16 @@ jobs:
           # Deliberately short. The three ways to fix this, spelled out, are in
           # the job summary on this same page — repeating them here only put the
           # same prose in two places that then drift apart.
+          # fail_config is the one failure the PR author cannot fix, so it must not
+          # be told to paste a marker. Sending someone to edit their description
+          # over a broken caller wastes their time and hides the actual bug.
+          if [ "$VERDICT" = "fail_config" ]; then
+            echo "❌ THIS REPO'S CODE REVIEW CHECK IS MISCONFIGURED"
+            echo "Nothing is wrong with this PR. See the job summary above; the fix"
+            echo "is in this repository's .github/workflows caller, not here."
+            exit 1
+          fi
+
           case "$VERDICT" in
             fail_malformed) echo "❌ CODE REVIEW ATTESTATION MALFORMED" ;;
             fail_example)   echo "❌ CODE REVIEW ATTESTATION IS AN EXAMPLE, NOT A REAL ONE" ;;
