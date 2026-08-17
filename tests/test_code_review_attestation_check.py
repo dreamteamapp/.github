@@ -171,6 +171,43 @@ CASES = [
     # merge_group short-circuits before the cutoff is even validated, so a queued
     # merge cannot be broken by a repo's date typo.
     ("merge queue beats bad cutoff", {"EVENT_NAME": "merge_group", "ENFORCE_FROM": "nope"},       "exempt_merge_group"),
+
+    # --- A cutoff shaped like a date but not being one is the DANGEROUS ------
+    # --- typo, because it is accepted rather than ignored. `2026-13-01` is a --
+    # --- day/month transposition that sorts after every real date in 2026, so
+    # --- before the fields were bounded it grandfathered every PR in the repo
+    # --- until 2100 under a green check. Every case here carries an OLD
+    # --- created_at, so an unbounded build returns exempt_grandfathered and
+    # --- the case fails — a bound that regresses cannot go unnoticed.
+    ("month 13 cutoff fails",        {"ENFORCE_FROM": "2026-13-01", "PR_CREATED_AT": "2020-01-01T00:00:00Z"}, "fail_config"),
+    ("month 00 cutoff fails",        {"ENFORCE_FROM": "2026-00-15", "PR_CREATED_AT": "2020-01-01T00:00:00Z"}, "fail_config"),
+    ("month 99 cutoff fails",        {"ENFORCE_FROM": "2026-99-01", "PR_CREATED_AT": "2020-01-01T00:00:00Z"}, "fail_config"),
+    ("day 32 cutoff fails",          {"ENFORCE_FROM": "2026-08-32", "PR_CREATED_AT": "2020-01-01T00:00:00Z"}, "fail_config"),
+    ("day 00 cutoff fails",          {"ENFORCE_FROM": "2026-08-00", "PR_CREATED_AT": "2020-01-01T00:00:00Z"}, "fail_config"),
+    # The full-timestamp branch normalizes nothing, so its three extra fields
+    # need the same bounding. `T24:00:00Z` is the plausible one: midnight
+    # written as the end of the day rather than the start of the next.
+    ("hour 24 cutoff fails",         {"ENFORCE_FROM": "2026-08-17T24:00:00Z", "PR_CREATED_AT": "2020-01-01T00:00:00Z"}, "fail_config"),
+    ("minute 60 cutoff fails",       {"ENFORCE_FROM": "2026-08-17T00:60:00Z", "PR_CREATED_AT": "2020-01-01T00:00:00Z"}, "fail_config"),
+    ("second 60 cutoff fails",       {"ENFORCE_FROM": "2026-08-17T00:00:60Z", "PR_CREATED_AT": "2020-01-01T00:00:00Z"}, "fail_config"),
+    ("all-nines time fails",         {"ENFORCE_FROM": "2026-08-17T99:99:99Z", "PR_CREATED_AT": "2020-01-01T00:00:00Z"}, "fail_config"),
+    # The bounds are inclusive at both ends. A cutoff on the 31st of December is
+    # the one a repo adopting at year end actually writes, and an off-by-one in
+    # either bound would reject it and fail every PR in that repo.
+    ("december 31 is a real date",   {"ENFORCE_FROM": "2026-12-31", "PR_CREATED_AT": "2026-12-30T00:00:00Z"}, "exempt_grandfathered"),
+    ("january 01 is a real date",    {"ENFORCE_FROM": "2026-01-01", "PR_CREATED_AT": "2025-12-31T00:00:00Z"}, "exempt_grandfathered"),
+    ("23:59:59 is a real time",      {"ENFORCE_FROM": "2026-08-17T23:59:59Z", "PR_CREATED_AT": "2026-08-17T23:59:58Z"}, "exempt_grandfathered"),
+    # A documented limit, asserted so it is a decision rather than a surprise:
+    # the day is bounded 1-31 for every month, so a day that does not exist in
+    # THAT month is accepted. It sorts between the last real day of the month and
+    # the first of the next, so the cutoff lands a day or two out — nothing like
+    # the 74 years month 13 was worth. Per-month lengths and leap years are the
+    # price of closing it.
+    ("february 30 is accepted",      {"ENFORCE_FROM": "2026-02-30", "PR_CREATED_AT": "2026-02-01T00:00:00Z"}, "exempt_grandfathered"),
+    # A leading zero must be read as decimal. `08` is an invalid OCTAL literal,
+    # and under `set -e` bash arithmetic aborts the step, which reports no status
+    # at all rather than a red one — the wedge this whole gate has to avoid.
+    ("leading-zero month and day",   {"ENFORCE_FROM": "2026-08-09", "PR_CREATED_AT": "2026-08-08T00:00:00Z"}, "exempt_grandfathered"),
 ]
 
 
@@ -279,6 +316,13 @@ def structural_checks(failures):
           f"{set(DEFAULTS) ^ set(steps['decide']['env'])}")
     check({"VERDICT", "EXEMPT_LABEL"} == set(steps["fail"]["env"]),
           "fail env fixture mirrors the step's env:", failures, str(set(steps["fail"]["env"])))
+    # The summary step reads two of these only inside the grandfathered and
+    # fail_config arms, so dropping a declaration breaks exactly the two verdicts
+    # a reader is least likely to hit by hand — and only under `set -u`, at
+    # runtime, on somebody else's repo.
+    check({"VERDICT", "ATTESTED_SHA", "ATTESTED_SKILL", "EXEMPT_AUTHOR", "HEAD_SHA",
+           "EXEMPT_LABEL", "ENFORCE_FROM", "PR_CREATED_AT"} == set(steps["summary"]["env"]),
+          "summary env fixture mirrors the step's env:", failures, str(set(steps["summary"]["env"])))
     check(doc[True]["workflow_call"]["inputs"]["exempt-label"]["default"] == DEFAULTS["EXEMPT_LABEL"],
           "exempt-label default matches the documented label", failures)
 
@@ -304,6 +348,11 @@ def summary_checks(failures):
         ("fail_missing", {}),
         ("fail_malformed", {"PR_BODY": "<!-- code-review: lanes=7 -->"}),
         ("fail_example", {"PR_BODY": f"```\n{GOOD}\n```"}),
+        # Both of these arms read ENFORCE_FROM and PR_CREATED_AT, so under
+        # `set -u` they are also the only two that catch the summary step losing
+        # one of those env declarations. Nothing rendered them before.
+        ("exempt_grandfathered", {"ENFORCE_FROM": "2026-08-17", "PR_CREATED_AT": "2026-01-01T00:00:00Z"}),
+        ("fail_config", {"ENFORCE_FROM": "2026-13-01"}),
     ):
         _, outputs = run(overrides)
         if outputs.get("verdict") != verdict:
@@ -317,10 +366,19 @@ def summary_checks(failures):
             "EXEMPT_AUTHOR": outputs.get("author", ""),
             "HEAD_SHA": overrides.get("HEAD_SHA", HEAD),
             "EXEMPT_LABEL": "no-review-needed",
+            "ENFORCE_FROM": overrides.get("ENFORCE_FROM", DEFAULTS["ENFORCE_FROM"]),
+            "PR_CREATED_AT": overrides.get("PR_CREATED_AT", DEFAULTS["PR_CREATED_AT"]),
         }
         proc, _, rendered = _run_step("summary", {}, keys_from=env, want_summary=True)
         ok = proc.returncode == 0 and EXPECTED_HEADING[verdict] in rendered
-        if verdict.startswith("fail"):
+        if verdict == "fail_config":
+            # The author cannot clear this one. The cutoff is validated before the
+            # body is parsed and before the label is read, so the three
+            # remediation steps are all dead ends here and printing them sends
+            # someone round a loop of description edits over somebody else's bug.
+            ok = ok and "To fix, pick one" not in rendered
+            ok = ok and "nothing you do to your PR fixes" in rendered
+        elif verdict.startswith("fail"):
             ok = ok and "To fix, pick one" in rendered
         else:
             # A passing PR must never render failure prose. This is what catches
