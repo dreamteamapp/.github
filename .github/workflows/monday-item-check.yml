@@ -75,9 +75,26 @@ jobs:
           BRANCH_ID: ${{ steps.check-branch.outputs.found_id }}
           TITLE_ID: ${{ steps.check-title.outputs.found_id }}
           DESC_ID: ${{ steps.check-description.outputs.found_id }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           echo "## Monday Item Connection Check Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+
+          # A merge group is not a pull request. It is a temporary branch holding
+          # pull requests that have ALREADY passed this gate, and it has no head
+          # branch, title or description of its own to carry an item ID. Re-asking
+          # here can only fail on inputs that cannot exist - and a required check
+          # that always fails holds every merge queue entry forever.
+          if [ "$EVENT_NAME" == "merge_group" ]; then
+            echo "### ✅ SOC2 Compliance: verified at pull request time" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "This is a merge group, not a pull request. Every entry in it already" >> $GITHUB_STEP_SUMMARY
+            echo "passed this check on its own pull request, where a branch name, title" >> $GITHUB_STEP_SUMMARY
+            echo "and description exist to carry a Monday Item ID. None of those exist" >> $GITHUB_STEP_SUMMARY
+            echo "on a merge group, so this reports the earlier verdict rather than" >> $GITHUB_STEP_SUMMARY
+            echo "re-testing inputs that cannot be present." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
 
           if [ "$BRANCH_VALID" == "true" ]; then
             echo "✅ **Branch Name**: Contains Monday Item ID \`$BRANCH_ID\`" >> $GITHUB_STEP_SUMMARY
@@ -120,7 +137,7 @@ jobs:
           fi
 
       - name: Fail if Requirements Not Met
-        if: steps.check-branch.outputs.valid != 'true' && steps.check-title.outputs.valid != 'true' && steps.check-description.outputs.valid != 'true'
+        if: github.event_name != 'merge_group' && steps.check-branch.outputs.valid != 'true' && steps.check-title.outputs.valid != 'true' && steps.check-description.outputs.valid != 'true'
         env:
           BRANCH_NAME: ${{ github.head_ref }}
           PR_TITLE: ${{ github.event.pull_request.title }}

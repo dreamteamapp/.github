@@ -23,8 +23,19 @@ name: Monday Item Check
 on:
   pull_request:
     branches: [master, main]
+  # Required on any repo that uses a merge queue, and harmless on one that does
+  # not. A merge queue re-runs required checks against a ref with no pull request
+  # attached; the reusable workflow short-circuits that to a pass, but only if it
+  # is invoked at all. A required check that never reports blocks the merge
+  # forever. Do NOT use a job-level `if:` to skip it instead - a skipped caller
+  # posts `monday-check`, not `monday-check / Verify Monday Item Connection`, so
+  # the required context is never posted and the entry hangs anyway.
+  merge_group:
 
 jobs:
+  # The job id must be `monday-check`. The required-check context is
+  # `<job id> / Verify Monday Item Connection`, and a ruleset names exactly one
+  # string - rename this and the repo silently drops out of the gate.
   monday-check:
     uses: dreamteamapp/.github/.github/workflows/monday-item-check.yml@master
 ```

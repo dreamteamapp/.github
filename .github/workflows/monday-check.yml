@@ -1,9 +1,36 @@
 name: monday-check
 
+# This repository's own caller - and the reference every other repo copies.
+#
+# In another repo, point at this one by ref instead of by path:
+#
+#   jobs:
+#     monday-check:
+#       uses: dreamteamapp/.github/.github/workflows/monday-item-check.yml@master
+#
+# TWO THINGS ARE LOAD-BEARING AND EASY TO GET WRONG WHEN COPYING:
+#
+#  1. The job id must be `monday-check` in every repo. The required-check context
+#     is `<job id> / Verify Monday Item Connection`, and a ruleset names exactly
+#     one string - rename the job here and this repo silently drops out of the
+#     gate while still showing a green check.
+#
+#  2. Keep the `merge_group` trigger. A merge queue re-runs required checks
+#     against a ref with no pull request attached; the reusable workflow
+#     short-circuits that to a pass, but only if it is invoked at all. Without
+#     this trigger the check never reports on a queued merge, and a required
+#     check that never reports blocks the merge forever.
+#
+#     Do NOT reach for a job-level `if:` to skip the call on a merge group
+#     instead. A skipped caller posts a check named `monday-check`, not
+#     `monday-check / Verify Monday Item Connection`, so the required context is
+#     never posted at all and the entry hangs exactly as it would have.
+
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
     branches: [master, main]
+  merge_group:
 
 jobs:
   monday-check:
